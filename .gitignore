@@ -2,3 +2,4 @@ data/vectorstore/
 __pycache__/
 *.pyc
 .ipynb_checkpoints/
+graphify-out/
