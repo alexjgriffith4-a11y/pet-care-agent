@@ -33,13 +33,16 @@ import os
 from dotenv import load_dotenv
 load_dotenv()
 
-
-
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
 
 from intent_classifier import classify
 from retriever import retrieve, format_context_for_prompt, RetrievedChunk
+
+# Phase 3 action modules
+from actions.food_safety  import check_food_safety
+from actions.symptom_triage import triage, fresh_state
+from actions.pet_profile  import handle_profile_turn
 
 # ── LLM setup ─────────────────────────────────────────────────────────────────
 # Same endpoint as the classifier, but different generation settings:
@@ -142,209 +145,158 @@ def _handle_general_qa(
     )
 
 
-# ── Food safety handler ───────────────────────────────────────────────────────
+# Food safety handler -- changed to Phase 3 module
 def _handle_food_safety(
     query: str,
     conversation_history: list[dict],
     pet_context: dict | None,
 ) -> dict:
     """
-    Answer a food/toxin safety question with RAG.
-
-    This handler is intentionally simple: food safety questions are almost
-    always single-turn ("can my dog eat X?"), so we retrieve with a topic
-    filter of 'nutrition' and let the LLM answer from the retrieved context.
-
-    The Phase 3 food_safety action module will extend this with structured
-    output (risk level, quantity guidance, vet recommendation).
+    Delegates to actions/food_safety.py (Phase 3, Step 8).
+ 
+    Returns the standard response shape plus an extra "risk_level" key
+    ("SAFE" | "CAUTION" | "UNSAFE" | "UNKNOWN") that the UI can use to
+    colour-code the result.
     """
-    species_filter = _detect_species(query, pet_context)
-
-    # No topic filter — food safety queries span both nutrition and toxins.
-    # The extra_instruction below tells the LLM how to frame the answer.
-    # Filtering by topic here risks missing relevant chunks when the topic
-    # doesn't match exactly (e.g. "is ibuprofen safe?" lives in toxins, not nutrition).
-    chunks = retrieve(
+    return check_food_safety(
         query=query,
-        top_k=5,
-        species=species_filter,
-        unique_sources=True,
-    )
-
-    context_block = format_context_for_prompt(chunks)
-
-    messages = _build_messages(
-        query=query,
-        context_block=context_block,
         conversation_history=conversation_history,
-        extra_instruction=(
-            "The user is asking about food or substance safety. "
-            "Clearly state whether the item is safe, unsafe, or uncertain. "
-            "If unsafe, explain the risk and recommend contacting a vet or "
-            "ASPCA Animal Poison Control (888-426-4435)."
-        ),
-    )
-
-    try:
-        response = _llm.invoke(messages)
-        answer   = response.content.strip()
-    except Exception as e:
-        return _make_error_response("food_safety", f"LLM call failed: {e}")
-
-    return _make_response(
-        response=answer,
-        intent="food_safety",
-        sources=_chunks_to_source_list(chunks),
+        pet_context=pet_context,
     )
 
 
-# ── Symptom triage handler ────────────────────────────────────────────────────
+# Symptom triage handler -- changed to Phase 3 module
 def _handle_symptom_triage(
     query: str,
     conversation_history: list[dict],
     pet_context: dict | None,
+    triage_state: dict | None = None,
 ) -> dict:
     """
-    Triage a symptom query: classify urgency and give grounded guidance.
-
-    This is a stub that does RAG-grounded triage. The Phase 3 symptom_triage
-    action module will replace this with a proper multi-turn state machine
-    that collects species → symptoms → duration → weight before triaging.
-
-    Why keep the stub?
-    So the agent loop works end-to-end before Phase 3 is done. A teammate
-    can demo a symptom question today; the state machine can be dropped in
-    without changing agent.py's routing logic.
+    Delegates to actions/symptom_triage.py (Phase 3, Step 9).
+ 
+    Multi-turn: the caller must preserve "triage_state" from the returned
+    dict and pass it back in on the next turn so the state machine can
+    continue slot-filling where it left off.
+ 
+    Extra keys in return dict:
+      "triage_state" — updated state (caller must store and pass back)
+      "complete"     — True once the final triage answer has been returned
     """
-    species_filter = _detect_species(query, pet_context)
-
-    chunks = retrieve(
+    return triage(
         query=query,
-        top_k=5,
-        species=species_filter,
-        unique_sources=True,
-    )
-
-    context_block = format_context_for_prompt(chunks)
-
-    messages = _build_messages(
-        query=query,
-        context_block=context_block,
         conversation_history=conversation_history,
-        extra_instruction=(
-            "The user is describing a symptom or health concern. "
-            "Based on the context provided, classify the urgency as one of:\n"
-            "  🟢 MONITOR — normal variation, watch at home\n"
-            "  🟡 VET SOON — schedule an appointment within 24-48 hours\n"
-            "  🔴 VET NOW — seek emergency care immediately\n"
-            "State the urgency level clearly at the start of your response, "
-            "then explain your reasoning using the sources."
-        ),
-    )
-
-    try:
-        response = _llm.invoke(messages)
-        answer   = response.content.strip()
-    except Exception as e:
-        return _make_error_response("symptom_triage", f"LLM call failed: {e}")
-
-    return _make_response(
-        response=answer,
-        intent="symptom_triage",
-        sources=_chunks_to_source_list(chunks),
+        pet_context=pet_context,
+        session_state=triage_state,
     )
 
 
-# ── Care routine handler ──────────────────────────────────────────────────────
+# Care routine handler -- changed to Phase 3 module
 def _handle_care_routine(
     query: str,
     conversation_history: list[dict],
     pet_context: dict | None,
+    profile_id: str = "default",
+    profile_session_state: dict | None = None,
 ) -> dict:
     """
-    Answer a care routine question, personalising the answer if a pet
-    profile exists (pet_context is not None).
-
-    This is a stub. The Phase 3 pet_profile action module will handle the
-    multi-turn profile collection and cross-session persistence. Once that
-    exists, this handler can pull a profile from SQLite and inject it here.
+    Delegates to actions/pet_profile.py (Phase 3, Step 10).
+ 
+    On a first visit this collects the pet profile across several turns
+    (name → species → age → breed) before delivering personalised advice.
+    On return visits the saved profile is loaded automatically.
+ 
+    Extra keys in return dict:
+      "profile"       — current profile dict (may be incomplete mid-collection)
+      "profile_saved" — True when the profile was written to disk this turn
     """
-    species_filter = _detect_species(query, pet_context)
-
-    chunks = retrieve(
+    return handle_profile_turn(
         query=query,
-        top_k=5,
-        species=species_filter,
-        unique_sources=True,
-    )
-
-    context_block = format_context_for_prompt(chunks)
-
-    # If we have a pet profile, inject it so the LLM can personalise the answer.
-    pet_profile_block = ""
-    if pet_context:
-        pet_profile_block = (
-            f"\nPet profile on file:\n"
-            f"  Name:    {pet_context.get('name', 'unknown')}\n"
-            f"  Species: {pet_context.get('species', 'unknown')}\n"
-            f"  Breed:   {pet_context.get('breed', 'unknown')}\n"
-            f"  Age:     {pet_context.get('age', 'unknown')}\n"
-            f"Use this profile to personalise your answer where relevant.\n"
-        )
-
-    messages = _build_messages(
-        query=query,
-        context_block=context_block,
         conversation_history=conversation_history,
-        extra_instruction=pet_profile_block if pet_profile_block else None,
-    )
-
-    try:
-        response = _llm.invoke(messages)
-        answer   = response.content.strip()
-    except Exception as e:
-        return _make_error_response("care_routine", f"LLM call failed: {e}")
-
-    return _make_response(
-        response=answer,
-        intent="care_routine",
-        sources=_chunks_to_source_list(chunks),
+        profile_id=profile_id,
+        session_state=profile_session_state,
     )
 
 
-# ── Public entry point ────────────────────────────────────────────────────────
-
+# Public entry point -- changed to Phase 3 module
 def run_turn(
     query: str,
     conversation_history: list[dict] | None = None,
     pet_context: dict | None = None,
+    # Phase 3 session state
+    triage_state: dict | None = None,
+    profile_id: str = "default",
+    profile_session_state: dict | None = None,
 ) -> dict:
     """
     Process one user turn and return a structured response.
-
-    This is the ONLY function the Streamlit UI and evaluation script should call.
-
+ 
+    This is the ONLY function the Streamlit UI and evaluation script
+    should call.
+ 
     Args:
-        query:                The user's latest message.
-        conversation_history: All prior turns in the session, each a dict with
-                              {"role": "user"|"assistant", "content": str}.
-                              Pass an empty list or None for the first turn.
-        pet_context:          Optional dict from the pet profile store, e.g.:
-                              {"name": "Luna", "species": "cat", "breed": "...", "age": 3}
-                              Pass None if no profile exists yet.
-
+        query:                 The user's latest message.
+        conversation_history:  All prior turns in the session, each a dict
+                               with {"role": "user"|"assistant", "content": str}.
+                               Pass an empty list or None for the first turn.
+        pet_context:           Optional dict from the pet profile store, e.g.:
+                               {"name": "Luna", "species": "cat", "breed": "...", "age": 3}
+                               Pass None if no profile exists yet.
+ 
+        --- Phase 3 state arguments ---
+        triage_state:          The "triage_state" dict returned by a previous
+                               symptom_triage turn. Pass None to start fresh.
+        profile_id:            Identifier for the pet profile to load/save.
+                               Defaults to "default" for single-user setups.
+        profile_session_state: In-progress profile dict from a previous
+                               care_routine turn. Pass None on first turn.
+ 
     Returns:
         {
-            "response": str,          # Text to display to the user
-            "intent":   str,          # Classified intent label
-            "sources":  list[dict],   # [{title, url, score}, ...]
-            "error":    str | None,   # None on success
+            "response":  str,
+            "intent":    str,
+            "sources":   list[dict],
+            "error":     str | None,
+            # Plus intent-specific keys (see handler docstrings above)
         }
-
-    This function never raises. All exceptions are caught and returned in
-    the "error" field so the UI can display a graceful failure message.
+ 
+    This function never raises. All exceptions are caught and returned
+    in the "error" field so the UI can display a graceful failure message.
     """
     history = conversation_history or []
+ 
+    if not query or not query.strip():
+        return _make_response(
+            response="I didn't catch that — could you rephrase your question?",
+            intent="out_of_scope",
+            sources=[],
+        )
+ 
+    intent = classify(query, conversation_history=history)
+ 
+    if intent == "out_of_scope":
+        return _handle_out_of_scope(query)
+ 
+    elif intent == "food_safety":
+        return _handle_food_safety(query, history, pet_context)
+ 
+    elif intent == "symptom_triage":
+        return _handle_symptom_triage(
+            query, history, pet_context,
+            triage_state=triage_state,
+        )
+ 
+    elif intent == "care_routine":
+        return _handle_care_routine(
+            query, history, pet_context,
+            profile_id=profile_id,
+            profile_session_state=profile_session_state,
+        )
+ 
+    else:
+        return _handle_general_qa(query, history, pet_context)
+
+  
 
     # ── Guardrail: reject empty queries ───────────────────────────────────────
     if not query or not query.strip():
