@@ -1,0 +1,11 @@
+{
+  "_readme": "Pet profiles are stored here, keyed by profile_id. Do not edit manually while the agent is running.",
+  "_example": {
+    "name": "Luna",
+    "species": "cat",
+    "breed": "Domestic Shorthair",
+    "age": 3,
+    "weight": 9.5,
+    "updated": "2026-04-08T00:00:00+00:00"
+  }
+}
