@@ -38,11 +38,35 @@ from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
 
 from intent_classifier import classify
 from retriever import retrieve, format_context_for_prompt, RetrievedChunk
+from guardrails import (
+    apply_output_fixes,
+    blocked_response,
+    check_input_guardrails,
+    check_retrieval_guardrails,
+    enforce_output_guardrails,
+    log_guardrail_event,
+    safe_error_response,
+    unknown_response,
+)
 
 # Phase 3 action modules
-from actions.food_safety  import check_food_safety
-from actions.symptom_triage import triage, fresh_state
-from actions.pet_profile  import handle_profile_turn
+from actions.food_safety import handle_food_safety
+from actions.symptom_triage import handle_symptom_triage
+
+try:
+    from actions.pet_profile import handle_profile_turn  # pyright: ignore[reportMissingImports]
+except Exception:
+    # Keep agent importable even if Phase 3 profile module is not present yet.
+    def handle_profile_turn(*args, **kwargs) -> dict:
+        return {
+            "response": (
+                "Pet profile setup is not enabled in this build yet. "
+                "You can still ask food safety, symptom, or general pet-care questions."
+            ),
+            "intent": "care_routine",
+            "sources": [],
+            "error": "pet_profile_module_missing",
+        }
 
 # ── LLM setup ─────────────────────────────────────────────────────────────────
 # Same endpoint as the classifier, but different generation settings:
@@ -116,12 +140,20 @@ def _handle_general_qa(
     """
     species_filter = _detect_species(query, pet_context)
 
-    chunks = retrieve(
-        query=query,
-        top_k=5,
-        species=species_filter,
-        unique_sources=True,
-    )
+    try:
+        chunks = retrieve(
+            query=query,
+            top_k=5,
+            species=species_filter,
+            unique_sources=True,
+        )
+    except Exception as e:
+        return safe_error_response("general_qa", f"retrieval_failed:{e}")
+
+    retrieval_guard = check_retrieval_guardrails(chunks=chunks, intent="general_qa")
+    if not retrieval_guard.allow:
+        _safe_log_guardrail_event(query=query, decision=retrieval_guard, intent="general_qa")
+        return unknown_response("general_qa", retrieval_guard.reason_code)
 
     context_block = format_context_for_prompt(chunks)
 
@@ -158,7 +190,7 @@ def _handle_food_safety(
     ("SAFE" | "CAUTION" | "UNSAFE" | "UNKNOWN") that the UI can use to
     colour-code the result.
     """
-    return check_food_safety(
+    return handle_food_safety(
         query=query,
         conversation_history=conversation_history,
         pet_context=pet_context,
@@ -183,11 +215,12 @@ def _handle_symptom_triage(
       "triage_state" — updated state (caller must store and pass back)
       "complete"     — True once the final triage answer has been returned
     """
-    return triage(
+    # Current module reconstructs state from conversation history.
+    # triage_state is kept in the signature for forward compatibility.
+    return handle_symptom_triage(
         query=query,
         conversation_history=conversation_history,
         pet_context=pet_context,
-        session_state=triage_state,
     )
 
 
@@ -264,69 +297,60 @@ def run_turn(
     in the "error" field so the UI can display a graceful failure message.
     """
     history = conversation_history or []
- 
-    if not query or not query.strip():
-        return _make_response(
-            response="I didn't catch that — could you rephrase your question?",
-            intent="out_of_scope",
-            sources=[],
-        )
- 
-    intent = classify(query, conversation_history=history)
- 
-    if intent == "out_of_scope":
-        return _handle_out_of_scope(query)
- 
-    elif intent == "food_safety":
-        return _handle_food_safety(query, history, pet_context)
- 
-    elif intent == "symptom_triage":
-        return _handle_symptom_triage(
-            query, history, pet_context,
-            triage_state=triage_state,
-        )
- 
-    elif intent == "care_routine":
-        return _handle_care_routine(
-            query, history, pet_context,
-            profile_id=profile_id,
-            profile_session_state=profile_session_state,
-        )
- 
-    else:
-        return _handle_general_qa(query, history, pet_context)
 
-  
+    # Input guardrails (pre-classification).
+    pre_guard = check_input_guardrails(
+        query=query,
+        intent=None,
+        conversation_history=history,
+    )
+    if not pre_guard.allow:
+        _safe_log_guardrail_event(query=query, decision=pre_guard, intent=None)
+        return blocked_response(pre_guard, intent="out_of_scope")
 
-    # ── Guardrail: reject empty queries ───────────────────────────────────────
-    if not query or not query.strip():
-        return _make_response(
-            response="I didn't catch that — could you rephrase your question?",
-            intent="out_of_scope",
-            sources=[],
-        )
+    try:
+        intent = classify(query, conversation_history=history)
+    except Exception as e:
+        return safe_error_response("general_qa", f"intent_classification_failed:{e}")
 
-    # ── Step 1: Classify intent ───────────────────────────────────────────────
-    intent = classify(query, conversation_history=history)
+    # Input guardrails (post-classification).
+    post_guard = check_input_guardrails(
+        query=query,
+        intent=intent,
+        conversation_history=history,
+    )
+    if not post_guard.allow:
+        _safe_log_guardrail_event(query=query, decision=post_guard, intent=intent)
+        return blocked_response(post_guard, intent=intent)
 
-    # ── Step 2: Route to handler ──────────────────────────────────────────────
-    # Each handler receives the same three arguments so they are interchangeable.
-    # When Phase 3 drops in a real action module, swap out the stub here.
-    if intent == "out_of_scope":
-        return _handle_out_of_scope(query)
+    try:
+        if intent == "out_of_scope":
+            result = _handle_out_of_scope(query)
 
-    elif intent == "food_safety":
-        return _handle_food_safety(query, history, pet_context)
+        elif intent == "food_safety":
+            result = _handle_food_safety(query, history, pet_context)
 
-    elif intent == "symptom_triage":
-        return _handle_symptom_triage(query, history, pet_context)
+        elif intent == "symptom_triage":
+            result = _handle_symptom_triage(
+                query, history, pet_context,
+                triage_state=triage_state,
+            )
 
-    elif intent == "care_routine":
-        return _handle_care_routine(query, history, pet_context)
+        elif intent == "care_routine":
+            result = _handle_care_routine(
+                query, history, pet_context,
+                profile_id=profile_id,
+                profile_session_state=profile_session_state,
+            )
 
-    else:
-        # "general_qa" is also the fallback for any unexpected intent label.
-        return _handle_general_qa(query, history, pet_context)
+        else:
+            # "general_qa" is also the fallback for any unexpected intent label.
+            result = _handle_general_qa(query, history, pet_context)
+
+    except Exception as e:
+        return safe_error_response(intent, f"handler_failed:{e}")
+
+    return _apply_final_output_guardrails(result=result, query=query)
 
 
 # ── Shared helpers ────────────────────────────────────────────────────────────
@@ -434,3 +458,52 @@ def _make_error_response(intent: str, error_message: str) -> dict:
         "sources": [],
         "error":   error_message,
     }
+
+
+def _apply_final_output_guardrails(result: dict, query: str) -> dict:
+    """
+    Final output policy gate across all handlers.
+    """
+    intent = result.get("intent", "general_qa")
+    sources = result.get("sources", [])
+    response_text = str(result.get("response", "") or "")
+
+    decision = enforce_output_guardrails(
+        response_text=response_text,
+        intent=intent,
+        query=query,
+        sources=sources,
+    )
+    if decision.allow:
+        result["response"] = apply_output_fixes(response_text, intent, query)
+        return result
+
+    # Try non-fatal remediation first (e.g. append disclaimer).
+    fixed_text = apply_output_fixes(response_text, intent, query)
+    if fixed_text != response_text:
+        retry_decision = enforce_output_guardrails(
+            response_text=fixed_text,
+            intent=intent,
+            query=query,
+            sources=sources,
+        )
+        if retry_decision.allow:
+            result["response"] = fixed_text
+            return result
+
+    _safe_log_guardrail_event(query=query, decision=decision, intent=intent)
+    blocked = blocked_response(decision, intent=intent)
+    for key, value in result.items():
+        if key not in {"response", "intent", "sources", "error"}:
+            blocked[key] = value
+    return blocked
+
+
+def _safe_log_guardrail_event(query: str, decision, intent: str | None) -> None:
+    """
+    Logging must never break user flow.
+    """
+    try:
+        log_guardrail_event(query=query, decision=decision, intent=intent)
+    except Exception:
+        pass

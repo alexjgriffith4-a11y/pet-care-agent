@@ -1,0 +1,2 @@
+{"ts_utc": "2026-04-10T20:22:02.857057+00:00", "query_hash": "0d23e91146c2", "intent": null, "allow": false, "reason_code": "prompt_injection", "severity": "block", "metadata": {}}
+{"ts_utc": "2026-04-10T20:22:02.857727+00:00", "query_hash": "4f118f59f99f", "intent": null, "allow": false, "reason_code": "animal_harm", "severity": "block", "metadata": {}}
