@@ -266,6 +266,37 @@ _FOLLOW_UP_QUESTIONS: dict[str, str] = {
     "weight":   "Approximately how much does your pet weigh? (This helps assess severity.)",
 }
 
+# Distinctive phrases the triage handler produces in its follow-up questions.
+# If the last assistant turn contains one of these, the next user message is
+# almost certainly a reply to an in-flight triage flow — even if it reads like
+# "about 20 lbs" on its own and the classifier would otherwise send it to
+# general_qa or out_of_scope. Used by `is_triage_in_progress()`.
+_TRIAGE_FOLLOWUP_MARKERS = (
+    "is this for a dog or a cat",
+    "describe the symptoms",
+    "how long has your pet",
+    "how much does your pet weigh",
+)
+
+
+def is_triage_in_progress(conversation_history: list[dict] | None) -> bool:
+    """
+    Return True if the most recent assistant turn was a triage follow-up
+    question — i.e. the agent is mid-triage and waiting for a slot answer.
+
+    Why this exists: the intent classifier looks at each query in near-isolation
+    and often mis-routes bare follow-up answers like "about 20 lbs" or
+    "for 2 days" to general_qa or out_of_scope. The agent loop consults this
+    helper to keep the routing sticky across a triage conversation.
+    """
+    if not conversation_history:
+        return False
+    for turn in reversed(conversation_history):
+        if turn.get("role") == "assistant":
+            content = (turn.get("content") or "").lower()
+            return any(marker in content for marker in _TRIAGE_FOLLOWUP_MARKERS)
+    return False
+
 def _ask_for_field(field: str, state: TriageState) -> str:
     """
     Generate a contextual follow-up question for the next missing field.

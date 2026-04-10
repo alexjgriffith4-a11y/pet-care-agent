@@ -51,7 +51,7 @@ from guardrails import (
 
 # Phase 3 action modules
 from actions.food_safety import handle_food_safety
-from actions.symptom_triage import handle_symptom_triage
+from actions.symptom_triage import handle_symptom_triage, is_triage_in_progress
 
 try:
     from actions.pet_profile import handle_profile_turn  # pyright: ignore[reportMissingImports]
@@ -312,6 +312,14 @@ def run_turn(
         intent = classify(query, conversation_history=history)
     except Exception as e:
         return safe_error_response("general_qa", f"intent_classification_failed:{e}")
+
+    # Sticky intent for in-flight multi-turn flows. The classifier looks at
+    # each query near-in-isolation and will route bare follow-up answers like
+    # "about 20 lbs" or "for 2 days" to general_qa or out_of_scope. If the
+    # previous assistant turn was a triage follow-up question, the user's
+    # reply belongs to that triage flow — keep the intent sticky.
+    if intent != "symptom_triage" and is_triage_in_progress(history):
+        intent = "symptom_triage"
 
     # Input guardrails (post-classification).
     post_guard = check_input_guardrails(

@@ -21,7 +21,14 @@ Response shape from the endpoint:
     }
 """
 
+import os
+
 import requests
+from dotenv import load_dotenv
+
+# Make sure RSM_API_KEY is loaded from .env for callers that import this
+# module directly (e.g. the retriever and the evaluation script).
+load_dotenv()
 
 # ── Configuration ──────────────────────────────────────────────────────────────
 
@@ -79,9 +86,10 @@ def embed_texts(texts: list[str], batch_size: int = DEFAULT_BATCH_SIZE) -> list[
                 json={"model": EMBEDDING_MODEL, "input": batch},
                 headers={
                     "Content-Type": "application/json",
-                    # The endpoint does not require auth, but the requests
-                    # library needs something in the header if we include it.
-                    # Omitting Authorization entirely is also fine.
+                    # The A2 endpoint now requires a Bearer token. We reuse
+                    # RSM_API_KEY (the same credential the Qwen3 endpoint uses)
+                    # because the course provides a single key for both.
+                    "Authorization": f"Bearer {os.environ.get('RSM_API_KEY', '')}",
                 },
                 timeout=60,  # seconds — batch calls can be slow on first request
             )
