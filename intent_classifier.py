@@ -23,11 +23,10 @@ Design notes
 - We accept `conversation_history` so the classifier can resolve pronouns
   ("is that safe for him?") by seeing what was said before.
 """
-import os
 from dotenv import load_dotenv
-load_dotenv()  # reads .env and puts the values into os.environ
-from langchain_openai import ChatOpenAI
+load_dotenv()
 from langchain_core.messages import SystemMessage, HumanMessage
+from llm_config import build_llm
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -80,6 +79,18 @@ Label: general_qa
 Query: do cats need annual vet checkups?
 Label: general_qa
 
+Query: hi
+Label: general_qa
+
+Query: hello there
+Label: general_qa
+
+Query: hey
+Label: general_qa
+
+Query: thanks
+Label: general_qa
+
 Query: what is the capital of France?
 Label: out_of_scope
 
@@ -98,10 +109,11 @@ Your job is to read a user query and return EXACTLY ONE label from this list:
 Rules:
 - Return only the label. No explanation, no punctuation, no extra words.
 - If the query mentions food, ingredients, or substances a pet ate or might eat → food_safety
-- If the query describes a symptom, illness, injury, or unusual behaviour → symptom_triage  
+- If the query describes a symptom, illness, injury, or unusual behaviour → symptom_triage
 - If the query asks about grooming, feeding schedules, exercise, or preventive care → care_routine
 - If the query is about pets but does not fit the above → general_qa
-- If the query has nothing to do with pet care → out_of_scope
+- Greetings (hi, hello, hey, thanks, etc.) and short social messages → general_qa
+- If the query has nothing to do with pet care and is not a greeting → out_of_scope
 
 {_FEW_SHOT_EXAMPLES}
 """
@@ -109,30 +121,8 @@ Rules:
 
 # ── LLM setup ─────────────────────────────────────────────────────────────────
 
-def _build_llm() -> ChatOpenAI:
-    """
-    Build the LangChain LLM client pointed at the course Qwen3 endpoint.
-
-    Why ChatOpenAI for a non-OpenAI model?
-    Qwen3's hosted endpoint speaks the OpenAI chat completions API format.
-    LangChain's ChatOpenAI lets us override the base URL so we talk to Qwen3
-    while reusing all of LangChain's message formatting and retry logic.
-
-    temperature=0 — we want deterministic classification, not creative output.
-    max_tokens=10 — the label is at most 2 words; anything longer is noise.
-    """
-    return ChatOpenAI(
-        model="qwen3-30b-a3b-fp8",
-        base_url="https://rsm-8430-finalproject.bjlkeng.io/v1",
-        api_key=os.environ.get("RSM_API_KEY", "no-key"),          # endpoint does not require auth
-        temperature=0,
-        max_tokens=10,
-    )
-
-
-# Module-level singleton — instantiated once when the module is first imported.
-# Avoids rebuilding the client object on every classify() call.
-_llm = _build_llm()
+# temperature=0 for deterministic classification; max_tokens=10 — label only.
+_llm = build_llm(temperature=0, max_tokens=10)
 
 
 # ── Public API ────────────────────────────────────────────────────────────────

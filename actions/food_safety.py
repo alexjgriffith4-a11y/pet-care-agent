@@ -25,54 +25,43 @@ Return shape (matches agent.py contract):
 
 from __future__ import annotations
 
-import os
-
 from dotenv import load_dotenv
 load_dotenv()
 
-from langchain_openai import ChatOpenAI
 from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
 
 from retriever import retrieve, format_context_for_prompt, RetrievedChunk
+from llm_config import build_llm
 
 # ── LLM ───────────────────────────────────────────────────────────────────────
-
-def _build_llm() -> ChatOpenAI:
-    return ChatOpenAI(
-        model="qwen3-30b-a3b-fp8",
-        base_url="https://rsm-8430-finalproject.bjlkeng.io/v1",
-        api_key=os.environ.get("RSM_API_KEY", "no-key"),
-        temperature=0.1,   # near-deterministic for safety-critical output
-        max_tokens=512,
-    )
-
-_llm = _build_llm()
+# temperature=0.1 — near-deterministic for safety-critical output
+_llm = build_llm(temperature=0.1, max_tokens=512)
 
 # ── System prompt ─────────────────────────────────────────────────────────────
 
-_SYSTEM_PROMPT = """You are a food and toxin safety specialist for a pet care assistant.
-Your job is to assess whether a food, plant, or household substance is safe for a dog or cat.
+_SYSTEM_PROMPT = """You're a friendly pet safety expert helping an owner figure out whether \
+something is safe for their dog or cat.
 
-Response format — always use this exact structure:
+Talk like a knowledgeable friend — warm, clear, and reassuring where you can be. \
+Lead with your honest assessment right away, then explain the "why" in plain language. \
+Cite your sources inline as [Source N] — weave them naturally into sentences.
 
-1. Risk label on its own line (choose exactly one):
-   🟢 SAFE — generally safe in normal amounts
-   🟡 CAUTION — safe only in small amounts, or with important caveats
-   🔴 TOXIC — dangerous; avoid completely
-   ❓ UNKNOWN — no reliable information available in the provided sources
+Always include one of these risk labels, but work it into the flow of your answer \
+rather than presenting it as a rigid header:
+  🟢 SAFE — generally fine in normal amounts
+  🟡 CAUTION — okay only in small amounts, or with caveats worth knowing
+  🔴 TOXIC — genuinely dangerous, keep away
+  ❓ UNKNOWN — the sources don't cover this one clearly enough to say
 
-2. Two to four sentences explaining the risk or safety, citing [Source N] for each claim.
+If it's CAUTION, TOXIC, or UNKNOWN, make sure to mention: \
+"If they've already eaten some, it's worth calling your vet or the \
+ASPCA Animal Poison Control line (888-426-4435) just to be safe."
 
-3. If the label is 🟡 CAUTION, 🔴 TOXIC, or ❓ UNKNOWN, end with:
-   "If your pet has already consumed this, contact your veterinarian or
-   ASPCA Animal Poison Control at 888-426-4435 immediately."
-
-Strict rules:
-- Never claim to be a veterinarian.
-- Never invent safety facts not present in the retrieved sources.
-- If the sources do not cover the specific item asked about, use ❓ UNKNOWN
-  and recommend a vet — do not extrapolate from similar items.
-- If the species is not specified, answer for both dogs and cats separately.
+Ground rules:
+- Never claim to be a vet.
+- Only share what the retrieved sources actually say — don't extrapolate.
+- If the sources don't cover the specific item, say so and use ❓ UNKNOWN.
+- If the species isn't mentioned, cover both dogs and cats.
 """
 
 # ── Public handler ────────────────────────────────────────────────────────────
@@ -96,15 +85,16 @@ def handle_food_safety(
     """
     species_filter = _detect_species(query, pet_context)
 
-    # No topic filter — food safety questions span both "nutrition" and "toxins"
-    # topic categories in the vector store. Filtering to just one risks missing
-    # the most relevant chunks (e.g. "is ibuprofen safe?" is in toxins, not nutrition).
-    chunks = retrieve(
-        query=query,
-        top_k=5,
-        species=species_filter,
-        unique_sources=True,
-    )
+    # No topic filter — food safety questions span both "nutrition" and "toxins".
+    try:
+        chunks = retrieve(
+            query=query,
+            top_k=5,
+            species=species_filter,
+            unique_sources=True,
+        )
+    except Exception:
+        chunks = []
 
     context_block = format_context_for_prompt(chunks)
     messages = _build_messages(query, context_block, conversation_history)

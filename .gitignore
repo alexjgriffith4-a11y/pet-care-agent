@@ -6,3 +6,6 @@ __pycache__/
 graphify-out/
 evaluation_plan.md
 *.claude/
+.venv/
+.DS_Store
+.claude/

@@ -7,5 +7,19 @@
     "age": 3,
     "weight": 9.5,
     "updated": "2026-04-08T00:00:00+00:00"
+  },
+  "default": {
+    "name": "ted",
+    "age": "3 years",
+    "breed": "pug",
+    "species": "dog",
+    "updated": "2026-04-12T03:00:48.691359+00:00"
+  },
+  "pete123": {
+    "name": "Jeffery",
+    "age": "Maybe around 3",
+    "breed": "pug",
+    "species": "dog",
+    "updated": "2026-04-12T03:14:17.975715+00:00"
   }
 }

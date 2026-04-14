@@ -593,7 +593,12 @@ def enforce_output_guardrails(
                 severity="warn",
             )
 
-    if _is_medical_intent(intent, query) and MEDICAL_DISCLAIMER.lower() not in text.lower():
+    already_has_vet_disclaimer = (
+        MEDICAL_DISCLAIMER.lower() in text.lower()
+        or "consult your veterinarian" in text.lower()
+        or "consult a veterinarian" in text.lower()
+    )
+    if _is_medical_intent(intent, query) and not already_has_vet_disclaimer:
         return GuardrailDecision(
             allow=False,
             reason_code="missing_medical_disclaimer",
@@ -622,7 +627,12 @@ def apply_output_fixes(response_text: str, intent: str, query: str) -> str:
             "I cannot provide harmful instructions. "
             "If your pet may have ingested something dangerous, contact a licensed veterinarian immediately."
         )
-    if _is_medical_intent(intent, query) and MEDICAL_DISCLAIMER.lower() not in text.lower():
+    already_has_vet_disclaimer = (
+        MEDICAL_DISCLAIMER.lower() in text.lower()
+        or "consult your veterinarian" in text.lower()
+        or "consult a veterinarian" in text.lower()
+    )
+    if _is_medical_intent(intent, query) and not already_has_vet_disclaimer:
         text = f"{text}\n\n{MEDICAL_DISCLAIMER}"
     return text
 

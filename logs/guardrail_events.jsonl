@@ -25,3 +25,10 @@
 {"ts_utc": "2026-04-10T21:57:53.381407+00:00", "query_hash": "be4887e0c5dc", "intent": null, "allow": false, "reason_code": "prompt_injection", "severity": "block", "metadata": {}}
 {"ts_utc": "2026-04-10T21:57:53.381853+00:00", "query_hash": "e3b0c44298fc", "intent": null, "allow": false, "reason_code": "empty_query", "severity": "warn", "metadata": {}}
 {"ts_utc": "2026-04-10T21:57:53.384060+00:00", "query_hash": "1554d4b01d51", "intent": null, "allow": false, "reason_code": "query_too_long", "severity": "warn", "metadata": {}}
+{"ts_utc": "2026-04-11T17:55:33.129896+00:00", "query_hash": "2cf24dba5fb0", "intent": "out_of_scope", "allow": false, "reason_code": "intent_out_of_scope", "severity": "warn", "metadata": {}}
+{"ts_utc": "2026-04-12T02:54:28.187581+00:00", "query_hash": "2cf24dba5fb0", "intent": "out_of_scope", "allow": false, "reason_code": "intent_out_of_scope", "severity": "warn", "metadata": {}}
+{"ts_utc": "2026-04-12T02:55:12.714952+00:00", "query_hash": "efb5a5ad7522", "intent": "out_of_scope", "allow": false, "reason_code": "intent_out_of_scope", "severity": "warn", "metadata": {}}
+{"ts_utc": "2026-04-12T03:00:04.569272+00:00", "query_hash": "f4e454f802b8", "intent": "out_of_scope", "allow": false, "reason_code": "intent_out_of_scope", "severity": "warn", "metadata": {}}
+{"ts_utc": "2026-04-12T03:16:13.102564+00:00", "query_hash": "ec13178b9872", "intent": "out_of_scope", "allow": false, "reason_code": "intent_out_of_scope", "severity": "warn", "metadata": {}}
+{"ts_utc": "2026-04-12T03:16:46.415915+00:00", "query_hash": "747dd98d34f1", "intent": "out_of_scope", "allow": false, "reason_code": "intent_out_of_scope", "severity": "warn", "metadata": {}}
+{"ts_utc": "2026-04-14T01:47:37.836493+00:00", "query_hash": "021f93987936", "intent": "general_qa", "allow": false, "reason_code": "missing_citations", "severity": "warn", "metadata": {}}
