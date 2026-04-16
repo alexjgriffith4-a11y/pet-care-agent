@@ -1,7 +1,7 @@
 """
 evaluation/test_cases.py
 ------------------------
-Phase 5 deliverable. 15 test cases covering the six categories from
+Phase 5 deliverable. 16 test cases covering the six categories from
 project_plan.md:113 — retrieval, routing, actions, out-of-scope rejection,
 prompt injection, and error handling.
 
@@ -16,9 +16,17 @@ This script:
   4. Writes a fresh evaluation/results.md with pass/fail, per-case detail,
      and an honest failure analysis section.
 
+Open-ended cases (7, 9, 16) are additionally graded by an LLM-as-judge against
+a hand-curated golden reference in evaluation/goldens/case_<id>.md. The
+judge scores four dimensions — faithfulness, format adherence, completeness,
+and hallucination_free — using the same Qwen3 endpoint the agent uses. Hard
+invariants (e.g. `TOXIC`, `[Source N]`, urgency label) still fail the case
+immediately; the judge only runs after those pass, and its verdict becomes
+part of the case's pass/fail decision.
+
 Design notes
 ------------
-- Plain Python, no pytest. 15 cases + custom skip logic + a markdown report
+- Plain Python, no pytest. 16 cases + custom skip logic + a markdown report
   are easier to write as a script than as fixtures + plugins.
 - No new dependencies. Everything used here is already in requirements.txt
   or the Python stdlib.
@@ -98,10 +106,120 @@ def _check_prereqs() -> dict:
 
 # ── Test helpers ──────────────────────────────────────────────────────────────
 
+GOLDENS_DIR = REPO_ROOT / "evaluation" / "goldens"
+
+
 def _has_source_citation(text: str) -> bool:
     """Mirror guardrails._has_source_citation without importing it."""
     import re
     return bool(re.search(r"\[(?:Source|S)\s*\d+\]", text, re.IGNORECASE))
+
+
+def _load_golden(case_id: int) -> str | None:
+    """Read evaluation/goldens/case_<id>.md, or None if it does not exist."""
+    path = GOLDENS_DIR / f"case_{case_id}.md"
+    if not path.exists():
+        return None
+    return path.read_text(encoding="utf-8").strip()
+
+
+_JUDGE_PROMPT = """You are a strict evaluator for a pet-care assistant. Score the CANDIDATE response against the GOLDEN reference using this rubric:
+
+- faithfulness (0-2): every factual claim aligns with the golden / known veterinary facts. 0 = contradictions, 1 = minor drift, 2 = fully aligned.
+- format_adherence (0-2): candidate follows the expected structure shown in golden (urgency label for triage, [Source N] citation, vet disclaimer). 0 = missing major elements, 1 = partial, 2 = matches.
+- completeness (0-2): candidate covers the key facts from golden. 0 = misses critical info, 1 = covers some, 2 = covers all key facts.
+- hallucination_free (0-1): free of fabricated or medically incorrect veterinary claims (wrong toxicity, invented drugs/doses, false physiology). Additional CORRECT veterinary information not in the golden is NOT a hallucination — the golden is a reference, not a ceiling. 0 = contains medically false or fabricated claims; 1 = all claims are medically plausible.
+
+Respond ONLY with a JSON object, no prose before or after:
+{{"faithfulness": <int>, "format_adherence": <int>, "completeness": <int>, "hallucination_free": <int>, "notes": "<one short sentence>"}}
+
+GOLDEN:
+<<<
+{golden}
+>>>
+
+CANDIDATE:
+<<<
+{candidate}
+>>>
+"""
+
+
+def _llm_judge(candidate: str, golden: str) -> dict | None:
+    """
+    Score candidate against golden using the same Qwen3 endpoint the agent uses.
+    Returns a dict of scores, or None if the endpoint is unavailable or the
+    response cannot be parsed. A None return is treated as "judge unavailable"
+    by the caller — it does not by itself fail the test.
+    """
+    try:
+        import re
+        from langchain_openai import ChatOpenAI
+        from langchain_core.messages import HumanMessage
+        from dotenv import load_dotenv
+        load_dotenv()
+
+        llm = ChatOpenAI(
+            model="qwen3-30b-a3b-fp8",
+            base_url="https://rsm-8430-finalproject.bjlkeng.io/v1",
+            api_key=os.environ.get("RSM_API_KEY", "no-key"),
+            temperature=0,
+            max_tokens=300,
+            timeout=60,
+        )
+        prompt = _JUDGE_PROMPT.format(golden=golden.strip(), candidate=candidate.strip())
+
+        # Retry up to 2 times on empty / malformed responses. Qwen3
+        # occasionally returns "" under load; a short backoff is enough.
+        last_text = ""
+        for attempt in range(2):
+            if attempt > 0:
+                time.sleep(2)
+            r = llm.invoke([HumanMessage(content=prompt)])
+            text = (getattr(r, "content", "") or "").strip()
+            last_text = text
+            m = re.search(r"\{.*\}", text, re.DOTALL)
+            if not m:
+                print(f"[judge] attempt {attempt+1}: no JSON in response (len={len(text)})")
+                continue
+            try:
+                obj = json.loads(m.group(0))
+            except Exception as e:
+                print(f"[judge] attempt {attempt+1}: JSON parse failed: {e}")
+                continue
+            missing = [
+                d for d in ("faithfulness", "format_adherence", "completeness", "hallucination_free")
+                if d not in obj or not isinstance(obj[d], int)
+            ]
+            if missing:
+                print(f"[judge] attempt {attempt+1}: missing/non-int dims {missing}")
+                continue
+            return obj
+
+        print(f"[judge] giving up after 2 attempts; last raw: {last_text[:200]!r}")
+        return None
+    except Exception as e:
+        print(f"[judge] failed: {type(e).__name__}: {e}")
+        return None
+
+
+def _judge_verdict(scores: dict) -> tuple[bool, str]:
+    """
+    Apply the pass/fail policy: every rubric dimension must be >= 1.
+    Returns (passed, one-line summary suitable for inclusion in `reason`).
+    """
+    dims = ("faithfulness", "format_adherence", "completeness", "hallucination_free")
+    summary = (
+        f"judge[faith={scores['faithfulness']}, fmt={scores['format_adherence']}, "
+        f"comp={scores['completeness']}, clean={scores['hallucination_free']}]"
+    )
+    notes = str(scores.get("notes", "")).strip()
+    if notes:
+        summary += f" notes={notes!r}"
+    for d in dims:
+        if scores[d] < 1:
+            return False, f"{d} scored 0 — {summary}"
+    return True, summary
 
 
 def _run_triage_conversation() -> dict:
@@ -115,10 +233,13 @@ def _run_triage_conversation() -> dict:
     from agent import run_turn
 
     history: list[dict] = []
+    # The triage state machine has exactly 3 slots — species, symptoms,
+    # duration (see actions/symptom_triage.py:_FOLLOW_UP_QUESTIONS). Turn 1
+    # fills species+symptoms from the phrasing; turn 2 supplies duration and
+    # triggers the final urgency assessment.
     turns = [
-        "my dog is vomiting",     # provides species + symptom
-        "for 2 days",              # provides duration
-        "about 20 lbs",            # provides weight -> triggers final assessment
+        "my dog is vomiting",     # provides species + symptoms
+        "for 2 days",              # provides duration -> final assessment
     ]
 
     last: dict = {}
@@ -130,7 +251,41 @@ def _run_triage_conversation() -> dict:
     return last
 
 
-# ── The 15 test cases ────────────────────────────────────────────────────────
+def _with_temp_profile(profile: dict, fn: Callable[[str], Any]) -> Any:
+    """
+    Run `fn(profile_id)` with a temporary saved pet profile, then restore the
+    original profiles file exactly as it was before the test.
+
+    This lets care-routine tests exercise the return-visit path without
+    depending on whatever real profiles happen to exist locally.
+    """
+    from actions.pet_profile import _PROFILES_PATH
+
+    profile_id = "__eval_temp_care_routine__"
+    original_text = _PROFILES_PATH.read_text(encoding="utf-8") if _PROFILES_PATH.exists() else None
+
+    try:
+        store = json.loads(original_text) if original_text else {}
+        store[profile_id] = {
+            **profile,
+            "updated": datetime.now(timezone.utc).isoformat(),
+        }
+        _PROFILES_PATH.write_text(
+            json.dumps(store, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        return fn(profile_id)
+    finally:
+        if original_text is None:
+            try:
+                _PROFILES_PATH.unlink()
+            except FileNotFoundError:
+                pass
+        else:
+            _PROFILES_PATH.write_text(original_text, encoding="utf-8")
+
+
+# ── The 16 test cases ────────────────────────────────────────────────────────
 # Each case is a dict with:
 #   id          — stable integer, matches the test plan table
 #   category    — one of the six buckets from project_plan.md:113
@@ -215,7 +370,17 @@ def _case_7_check(result):
         return False, "no sources returned"
     if not _has_source_citation(resp):
         return False, "response missing [Source N] citation"
-    return True, f"toxic call-out + {len(result['sources'])} sources + citation present"
+    base = f"toxic call-out + {len(result['sources'])} sources + citation present"
+    golden = _load_golden(7)
+    if golden is None:
+        return True, base + " (no golden ref)"
+    scores = _llm_judge(resp, golden)
+    if scores is None:
+        return True, base + " (judge unavailable, hard invariants only)"
+    ok, summary = _judge_verdict(scores)
+    if not ok:
+        return False, f"{base}; {summary}"
+    return True, f"{base}; {summary}"
 
 
 def _case_8_run():
@@ -247,7 +412,17 @@ def _case_9_check(result):
         return False, "final response missing urgency label (MONITOR / VET SOON / VET NOW)"
     if "veterinarian" not in resp.lower():
         return False, "final response missing veterinarian disclaimer"
-    return True, "multi-turn flow completed with urgency label + disclaimer"
+    base = "multi-turn flow completed with urgency label + disclaimer"
+    golden = _load_golden(9)
+    if golden is None:
+        return True, base + " (no golden ref)"
+    scores = _llm_judge(resp, golden)
+    if scores is None:
+        return True, base + " (judge unavailable, hard invariants only)"
+    ok, summary = _judge_verdict(scores)
+    if not ok:
+        return False, f"{base}; {summary}"
+    return True, f"{base}; {summary}"
 
 
 def _case_10_run():
@@ -328,6 +503,58 @@ def _case_15_check(result):
     if "query_too_long" not in err:
         return False, f"expected query_too_long error, got {err!r}"
     return True, "6000-char query blocked as query_too_long"
+
+
+def _case_16_run():
+    from agent import run_turn
+
+    profile = {
+        "name": "Buddy",
+        "species": "dog",
+        "breed": "golden retriever",
+        "age": "3 years",
+    }
+
+    return _with_temp_profile(
+        profile,
+        lambda profile_id: run_turn(
+            "how often should I bathe my golden retriever?",
+            profile_id=profile_id,
+        ),
+    )
+
+
+def _case_16_check(result):
+    if result.get("intent") != "care_routine":
+        return False, f"intent was {result.get('intent')!r}, expected care_routine"
+    if result.get("error") is not None:
+        return False, f"unexpected error: {result.get('error')!r}"
+
+    profile = result.get("profile") or {}
+    if profile.get("name") != "Buddy" or profile.get("species") != "dog":
+        return False, f"returned profile was {profile!r}, expected saved dog profile"
+    if result.get("profile_saved") is not False:
+        return False, f"profile_saved should be False on return visit, got {result.get('profile_saved')!r}"
+
+    sources = result.get("sources") or []
+    if not sources:
+        return False, "no sources returned"
+
+    resp = result.get("response", "")
+    if not _has_source_citation(resp):
+        return False, "response missing [Source N] citation"
+
+    base = f"returned cited care-routine answer with {len(sources)} sources using saved profile"
+    golden = _load_golden(16)
+    if golden is None:
+        return True, base + " (no golden ref)"
+    scores = _llm_judge(resp, golden)
+    if scores is None:
+        return True, base + " (judge unavailable, hard invariants only)"
+    ok, summary = _judge_verdict(scores)
+    if not ok:
+        return False, f"{base}; {summary}"
+    return True, f"{base}; {summary}"
 
 
 TEST_CASES: list[dict] = [
@@ -421,6 +648,12 @@ TEST_CASES: list[dict] = [
         "description": "run_turn('a'*6000) returns dict with query_too_long error",
         "requires": set(),
         "run": _case_15_run, "check": _case_15_check,
+    },
+    {
+        "id": 16, "category": "actions",
+        "description": "saved-profile care_routine query returns cited personalized advice",
+        "requires": {"qwen3", "embedder"},
+        "run": _case_16_run, "check": _case_16_check,
     },
 ]
 
@@ -631,10 +864,10 @@ def _write_results_md(results: list[CaseResult], prereqs: dict) -> None:
     lines.append("")
     lines.append("### Known gaps (not tested on purpose)")
     lines.append("")
-    lines.append("- **`care_routine` intent** — `actions/pet_profile.py` does not exist.")
-    lines.append("  `agent.py:56-69` falls back to a stub that returns an error for every")
-    lines.append("  care_routine query. There is no meaningful behaviour to test, so no")
-    lines.append("  case was written. This is a Phase 3 gap, not a Phase 5 gap.")
+    lines.append("- **`care_routine` coverage is still shallow** — this suite now has a")
+    lines.append("  return-visit smoke test for `actions/pet_profile.py`, but it still does")
+    lines.append("  not directly test first-visit profile collection across turns or weak-")
+    lines.append("  retrieval behaviour in the care-routine path.")
     lines.append("")
 
     failing = [r for r in results if r.status in ("fail", "error")]
@@ -672,9 +905,12 @@ def _write_results_md(results: list[CaseResult], prereqs: dict) -> None:
 
     lines.append("### Followups")
     lines.append("")
-    lines.append("- Implement `actions/pet_profile.py` and add three care_routine cases.")
-    lines.append("- If case 7 or 9 is noisy across runs, add an LLM-as-judge fallback that")
-    lines.append("  reuses the same `ChatOpenAI(qwen3)` client the agent uses.")
+    lines.append("- Expand `care_routine` coverage with first-visit profile collection,")
+    lines.append("  return-visit personalization, and low-retrieval fallback cases.")
+    lines.append("- Replace the placeholder `evaluation/goldens/case_7.md` and `case_9.md`")
+    lines.append("  with outputs captured from a frontier model (Claude / GPT-4 web UI),")
+    lines.append("  using the same queries the cases run. The current goldens are reasonable")
+    lines.append("  veterinary references but not frontier-model outputs.")
     lines.append("- If retrieval cases drift below their score thresholds, re-tune the")
     lines.append("  `min_top_score` / `min_avg_score` constants in")
     lines.append("  `guardrails.check_retrieval_guardrails` instead of loosening the tests.")

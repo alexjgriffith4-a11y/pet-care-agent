@@ -9,3 +9,5 @@ evaluation_plan.md
 .venv/
 .DS_Store
 .claude/
+*lab3_ref/
+RAG_FLOW.md
